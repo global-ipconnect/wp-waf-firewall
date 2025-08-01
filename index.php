@@ -2,9 +2,10 @@
 /*
 Plugin Name: Global IPconnect Access Control
 Description: Redirects proxy visitors to a block page using proxycheck.io.
-Version: 1.0.17
+Version: 1.0.19
 Author: Global-IPconnect
 */
+
 if (!defined('ABSPATH')) exit;
 
 // === CONSTANTS ===
@@ -48,24 +49,20 @@ function pcr_create_cache_table() {
 function pcr_get_real_ip() {
     $ip = '';
     
-    // Cloudflare headers
     if (isset($_SERVER['HTTP_CF_CONNECTING_IP'])) {
         $ip = $_SERVER['HTTP_CF_CONNECTING_IP'];
     }
-    // Other proxy headers (in order of reliability)
     elseif (isset($_SERVER['HTTP_X_REAL_IP'])) {
         $ip = $_SERVER['HTTP_X_REAL_IP'];
     }
     elseif (isset($_SERVER['HTTP_X_FORWARDED_FOR'])) {
         $ips = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
-        $ip = trim($ips[0]); // Gets the first IP in the chain
+        $ip = trim($ips[0]);
     }
-    // Default remote address
     else {
         $ip = $_SERVER['REMOTE_ADDR'];
     }
     
-    // Validate the IP
     return filter_var($ip, FILTER_VALIDATE_IP) ? $ip : $_SERVER['REMOTE_ADDR'];
 }
 
@@ -90,6 +87,15 @@ function pcr_admin_menu_setup() {
     if (!get_option(PCR_SETUP_DONE)) {
         add_menu_page('ProxyCheck Setup', 'ProxyCheck Setup', 'manage_options', 'pcr_setup', 'pcr_setup_page');
     }
+    // Add hidden page for flush cache action
+    add_submenu_page(
+        null, // No parent menu
+        'Flush IP Cache', // Page title
+        '', // Menu title (not shown)
+        'manage_options', // Capability
+        'pcr_flush_cache', // Menu slug
+        'pcr_flush_cache_handler' // Function
+    );
 }
 
 function pcr_add_admin_bar_flush_button($wp_admin_bar) {
@@ -98,29 +104,35 @@ function pcr_add_admin_bar_flush_button($wp_admin_bar) {
     $wp_admin_bar->add_node(array(
         'id'    => 'pcr-flush-cache',
         'title' => 'Flush IP Cache',
-        'href'  => wp_nonce_url(admin_url('admin.php?page=pcr_flush_cache&action=flush_cache'), 'pcr_flush_cache'),
+        'href'  => wp_nonce_url(admin_url('admin.php?page=pcr_flush_cache'), 'pcr_flush_cache'),
         'meta'  => array('title' => 'Clear all cached IP addresses')
     ));
 }
 
-// Handle flush cache action
-add_action('admin_init', function() {
-    if (isset($_GET['page']) && $_GET['page'] === 'pcr_flush_cache' && 
-        isset($_GET['action']) && $_GET['action'] === 'flush_cache' && 
-        check_admin_referer('pcr_flush_cache')) {
-        pcr_flush_ip_cache();
-        
-        add_action('admin_notices', function() {
-            echo '<div class="notice notice-success is-dismissible"><p>IP cache has been flushed successfully.</p></div>';
-        });
+function pcr_flush_cache_handler() {
+    if (!current_user_can('manage_options') || !check_admin_referer('pcr_flush_cache')) {
+        wp_die('Sorry, you are not allowed to perform this action.');
     }
-});
+
+    pcr_flush_ip_cache();
+    
+    // Redirect back with success message
+    wp_redirect(add_query_arg('pcr_flushed', '1', admin_url()));
+    exit;
+}
 
 function pcr_flush_ip_cache() {
     global $wpdb;
     $table_name = $wpdb->prefix . PCR_CACHE_TABLE;
     $wpdb->query("TRUNCATE TABLE $table_name");
 }
+
+// Show admin notice after flush
+add_action('admin_notices', function() {
+    if (isset($_GET['pcr_flushed'])) {
+        echo '<div class="notice notice-success is-dismissible"><p>IP cache has been flushed successfully.</p></div>';
+    }
+});
 
 // === SETUP PAGE ===
 function pcr_setup_page() {
@@ -271,7 +283,7 @@ add_action('template_redirect', function () {
     if ($is_proxy) {
         $current_url = (is_ssl() ? 'https://' : 'http://') . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI'];
         error_log('PCR DEBUG: Redirecting to block page');
-        wp_redirect(PCR_BLOCK_URL . urlencode($current_url));
+        wp_redirect(PCR_BLOCK_URL . urlencode($current_url), 307);
         exit;
     } else {
         error_log('PCR DEBUG: Visitor is not a proxy');
