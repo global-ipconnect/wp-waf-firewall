@@ -2,7 +2,7 @@
 /*
 Plugin Name: Global IPconnect Access Control
 Description: Redirects proxy visitors to a block page using proxycheck.io.
-Version: 1.0.19
+Version: 1.0.22
 Author: Global-IPconnect
 */
 
@@ -207,6 +207,42 @@ function pcr_clean_expired_cache() {
     ));
 }
 
+// === CHECK IF IP SHOULD BE BLOCKED ===
+function pcr_should_block_ip($ip_data) {
+    // Handle both old and new API response formats
+    $is_proxy = false;
+    
+    // Old format: direct 'proxy' field
+    if (isset($ip_data['proxy']) && $ip_data['proxy'] === 'yes') {
+        $is_proxy = true;
+        error_log('PCR DEBUG: Old format proxy detection');
+    }
+    
+    // New format: detections object
+    if (isset($ip_data['detections']) && is_array($ip_data['detections'])) {
+        $detections = $ip_data['detections'];
+        
+        // Check if any detection is true
+        $detection_types = ['proxy', 'vpn', 'compromised', 'scraper', 'tor', 'hosting', 'anonymous'];
+        
+        foreach ($detection_types as $type) {
+            if (isset($detections[$type]) && $detections[$type] === true) {
+                $is_proxy = true;
+                error_log("PCR DEBUG: New format detection found: $type");
+                break;
+            }
+        }
+        
+        // Check if detections are modified by whitelist (only block if not whitelisted)
+        if ($is_proxy && isset($detections['detections_modified_by']['whitelist'])) {
+            error_log('PCR DEBUG: Detections modified by whitelist, allowing access');
+            $is_proxy = false;
+        }
+    }
+    
+    return $is_proxy;
+}
+
 // === REDIRECT LOGIC ===
 add_action('template_redirect', function () {
     if (is_admin() || !get_option(PCR_SETUP_DONE)) return;
@@ -239,7 +275,7 @@ add_action('template_redirect', function () {
             $needs_check = false;
             error_log('PCR DEBUG: Using cached proxy status: ' . ($is_proxy ? 'proxy' : 'clean') . " (age: {$age}s)");
         } else {
-            error_log('PCR DEBUG: Cached entry expired (age: {$age}s), rechecking');
+            error_log('PCR DEBUG: Cached entry expired (age: ' . $age . 's), rechecking');
         }
     }
 
@@ -264,7 +300,10 @@ add_action('template_redirect', function () {
 
         error_log('PCR DEBUG: API key decrypted successfully');
 
-        $tag = rawurlencode('Global IPconnect Access Control');
+        // Get the site domain for the tag
+        $site_domain = parse_url(get_site_url(), PHP_URL_HOST);
+        $tag = rawurlencode('Access Control - ' . $site_domain);
+        
         $url = "https://proxycheck.io/v2/{$ip}?key={$api_key}&vpn=1&asn=1&node=1&tag={$tag}";
         $response = wp_remote_get($url, ['timeout' => 5]);
 
@@ -276,8 +315,14 @@ add_action('template_redirect', function () {
         $body = json_decode(wp_remote_retrieve_body($response), true);
         error_log('PCR DEBUG: Proxycheck response: ' . print_r($body, true));
 
-        $is_proxy = isset($body[$ip]['proxy']) && $body[$ip]['proxy'] === 'yes';
-        pcr_update_ip_cache($ip, $ip_hash, $is_proxy);
+        // Check if IP data exists in response
+        if (isset($body[$ip]) && is_array($body[$ip])) {
+            $is_proxy = pcr_should_block_ip($body[$ip]);
+            pcr_update_ip_cache($ip, $ip_hash, $is_proxy);
+        } else {
+            error_log('PCR DEBUG: No valid IP data in response');
+            $is_proxy = false;
+        }
     }
 
     if ($is_proxy) {
@@ -286,7 +331,7 @@ add_action('template_redirect', function () {
         wp_redirect(PCR_BLOCK_URL . urlencode($current_url), 307);
         exit;
     } else {
-        error_log('PCR DEBUG: Visitor is not a proxy');
+        error_log('PCR DEBUG: Visitor is not a proxy or is whitelisted');
     }
 });
 
