@@ -1,12 +1,17 @@
 <?php
 /*
 Plugin Name: Global IPconnect Access Control
-Description: Redirects proxy visitors to a block page using proxycheck.io.
-Version: 1.0.22
+Description: Redirects anonymised visitors to a block page using proxycheck.io.
+Version: 1.1.1
 Author: Global-IPconnect
 */
 
 if (!defined('ABSPATH')) exit;
+
+if (defined('PCR_ACCESS_CONTROL_LOADED')) {
+    return;
+}
+define('PCR_ACCESS_CONTROL_LOADED', true);
 
 // === CONSTANTS ===
 define('PCR_OPTION_KEY', 'pcr_api_key_encrypted');
@@ -15,17 +20,18 @@ define('PCR_SALT_FILE', plugin_dir_path(__FILE__) . '.salt.php');
 define('PCR_BLOCK_URL', 'https://access.global-ipconnect.com/403/?from=');
 define('PCR_CACHE_TABLE', 'pcr_ip_cache');
 define('PCR_CACHE_EXPIRY', 30 * MINUTE_IN_SECONDS); // 30 minutes
+define('PCR_HIGH_RISK_THRESHOLD', 65); // Risk score must exceed this value to trigger a block
 
 // === PLUGIN ACTIVATION ===
-register_activation_hook(__FILE__, 'pcr_plugin_activation');
+register_activation_hook(__FILE__, 'pcr_access_control_activate');
 
-function pcr_plugin_activation() {
-    pcr_create_cache_table();
+function pcr_access_control_activate() {
+    pcr_ac_create_cache_table();
     add_option('pcr_activation_redirect', true);
 }
 
 // === CREATE CACHE TABLE ===
-function pcr_create_cache_table() {
+function pcr_ac_create_cache_table() {
     global $wpdb;
     $table_name = $wpdb->prefix . PCR_CACHE_TABLE;
     $charset_collate = $wpdb->get_charset_collate();
@@ -46,7 +52,7 @@ function pcr_create_cache_table() {
 }
 
 // === GET REAL IP ADDRESS ===
-function pcr_get_real_ip() {
+function pcr_ac_get_real_ip() {
     $ip = '';
     
     if (isset($_SERVER['HTTP_CF_CONNECTING_IP'])) {
@@ -67,9 +73,9 @@ function pcr_get_real_ip() {
 }
 
 // === ADMIN REDIRECT ===
-add_action('admin_init', 'pcr_activation_redirect');
+add_action('admin_init', 'pcr_ac_activation_redirect');
 
-function pcr_activation_redirect() {
+function pcr_ac_activation_redirect() {
     if (get_option('pcr_activation_redirect', false)) {
         delete_option('pcr_activation_redirect');
         if (!get_option(PCR_SETUP_DONE)) {
@@ -80,12 +86,12 @@ function pcr_activation_redirect() {
 }
 
 // === ADMIN MENU ===
-add_action('admin_bar_menu', 'pcr_add_admin_bar_flush_button', 100);
-add_action('admin_menu', 'pcr_admin_menu_setup');
+add_action('admin_bar_menu', 'pcr_ac_add_admin_bar_flush_button', 100);
+add_action('admin_menu', 'pcr_ac_admin_menu_setup');
 
-function pcr_admin_menu_setup() {
+function pcr_ac_admin_menu_setup() {
     if (!get_option(PCR_SETUP_DONE)) {
-        add_menu_page('ProxyCheck Setup', 'ProxyCheck Setup', 'manage_options', 'pcr_setup', 'pcr_setup_page');
+        add_menu_page('ProxyCheck Setup', 'ProxyCheck Setup', 'manage_options', 'pcr_setup', 'pcr_ac_setup_page');
     }
     // Add hidden page for flush cache action
     add_submenu_page(
@@ -94,11 +100,11 @@ function pcr_admin_menu_setup() {
         '', // Menu title (not shown)
         'manage_options', // Capability
         'pcr_flush_cache', // Menu slug
-        'pcr_flush_cache_handler' // Function
+        'pcr_ac_flush_cache_handler' // Function
     );
 }
 
-function pcr_add_admin_bar_flush_button($wp_admin_bar) {
+function pcr_ac_add_admin_bar_flush_button($wp_admin_bar) {
     if (!current_user_can('manage_options') || !get_option(PCR_SETUP_DONE)) return;
 
     $wp_admin_bar->add_node(array(
@@ -109,19 +115,19 @@ function pcr_add_admin_bar_flush_button($wp_admin_bar) {
     ));
 }
 
-function pcr_flush_cache_handler() {
+function pcr_ac_flush_cache_handler() {
     if (!current_user_can('manage_options') || !check_admin_referer('pcr_flush_cache')) {
         wp_die('Sorry, you are not allowed to perform this action.');
     }
 
-    pcr_flush_ip_cache();
+    pcr_ac_flush_ip_cache();
     
     // Redirect back with success message
     wp_redirect(add_query_arg('pcr_flushed', '1', admin_url()));
     exit;
 }
 
-function pcr_flush_ip_cache() {
+function pcr_ac_flush_ip_cache() {
     global $wpdb;
     $table_name = $wpdb->prefix . PCR_CACHE_TABLE;
     $wpdb->query("TRUNCATE TABLE $table_name");
@@ -135,11 +141,11 @@ add_action('admin_notices', function() {
 });
 
 // === SETUP PAGE ===
-function pcr_setup_page() {
+function pcr_ac_setup_page() {
     if (isset($_POST['pcr_submit']) && !empty($_POST['pcr_api_key'])) {
         $salt = bin2hex(random_bytes(16));
         file_put_contents(PCR_SALT_FILE, '<?php return "' . $salt . '";');
-        $encrypted = pcr_encrypt(sanitize_text_field($_POST['pcr_api_key']), $salt);
+        $encrypted = pcr_ac_encrypt(sanitize_text_field($_POST['pcr_api_key']), $salt);
         update_option(PCR_OPTION_KEY, $encrypted);
         update_option(PCR_SETUP_DONE, true);
 
@@ -159,14 +165,14 @@ function pcr_setup_page() {
 }
 
 // === ENCRYPTION FUNCTIONS ===
-function pcr_encrypt($data, $salt) {
+function pcr_ac_encrypt($data, $salt) {
     $key = hash('sha256', $salt, true);
     $iv = openssl_random_pseudo_bytes(16);
     $encrypted = openssl_encrypt($data, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
     return base64_encode($iv . $encrypted);
 }
 
-function pcr_decrypt($data, $salt) {
+function pcr_ac_decrypt($data, $salt) {
     $key = hash('sha256', $salt, true);
     $data = base64_decode($data);
     if (!$data || strlen($data) < 17) return null;
@@ -176,7 +182,7 @@ function pcr_decrypt($data, $salt) {
 }
 
 // === CACHE MANAGEMENT ===
-function pcr_get_cached_ip($ip_hash) {
+function pcr_ac_get_cached_ip($ip_hash) {
     global $wpdb;
     $table_name = $wpdb->prefix . PCR_CACHE_TABLE;
     
@@ -185,7 +191,7 @@ function pcr_get_cached_ip($ip_hash) {
     ));
 }
 
-function pcr_update_ip_cache($ip, $ip_hash, $is_proxy) {
+function pcr_ac_update_ip_cache($ip, $ip_hash, $is_proxy) {
     global $wpdb;
     $table_name = $wpdb->prefix . PCR_CACHE_TABLE;
     
@@ -197,7 +203,7 @@ function pcr_update_ip_cache($ip, $ip_hash, $is_proxy) {
     ));
 }
 
-function pcr_clean_expired_cache() {
+function pcr_ac_clean_expired_cache() {
     global $wpdb;
     $table_name = $wpdb->prefix . PCR_CACHE_TABLE;
     $expiry_time = date('Y-m-d H:i:s', time() - PCR_CACHE_EXPIRY);
@@ -207,40 +213,86 @@ function pcr_clean_expired_cache() {
     ));
 }
 
-// === CHECK IF IP SHOULD BE BLOCKED ===
-function pcr_should_block_ip($ip_data) {
-    // Handle both old and new API response formats
-    $is_proxy = false;
-    
-    // Old format: direct 'proxy' field
-    if (isset($ip_data['proxy']) && $ip_data['proxy'] === 'yes') {
-        $is_proxy = true;
-        error_log('PCR DEBUG: Old format proxy detection');
+function pcr_ac_truthy_flag($value) {
+    if (is_bool($value)) {
+        return $value;
     }
-    
-    // New format: detections object
-    if (isset($ip_data['detections']) && is_array($ip_data['detections'])) {
-        $detections = $ip_data['detections'];
-        
-        // Check if any detection is true
-        $detection_types = ['proxy', 'vpn', 'compromised', 'scraper', 'tor', 'hosting', 'anonymous'];
-        
-        foreach ($detection_types as $type) {
-            if (isset($detections[$type]) && $detections[$type] === true) {
-                $is_proxy = true;
-                error_log("PCR DEBUG: New format detection found: $type");
-                break;
+
+    if (is_numeric($value)) {
+        return (int) $value === 1;
+    }
+
+    if (is_string($value)) {
+        $normalized = strtolower($value);
+        return in_array($normalized, array('1', 'true', 'yes', 'on'), true);
+    }
+
+    return false;
+}
+
+function pcr_ac_is_whitelisted_result($ip_data) {
+    if (!is_array($ip_data) || empty($ip_data['result'])) {
+        return false;
+    }
+
+    $result = $ip_data['result'];
+
+    foreach (array('whitelisted', 'whitelist') as $key) {
+        if (array_key_exists($key, $result) && pcr_ac_truthy_flag($result[$key])) {
+            return true;
+        }
+    }
+
+    if (!empty($result['list']) && strtolower((string) $result['list']) === 'whitelist') {
+        return true;
+    }
+
+    if (!empty($result['lists']) && is_array($result['lists'])) {
+        $lists = $result['lists'];
+        foreach (array('whitelist', 'white') as $list_key) {
+            if (array_key_exists($list_key, $lists) && pcr_ac_truthy_flag($lists[$list_key])) {
+                return true;
             }
         }
-        
-        // Check if detections are modified by whitelist (only block if not whitelisted)
-        if ($is_proxy && isset($detections['detections_modified_by']['whitelist'])) {
-            error_log('PCR DEBUG: Detections modified by whitelist, allowing access');
-            $is_proxy = false;
+    }
+
+    return false;
+}
+
+function pcr_ac_should_block_ip_data($ip_data) {
+    if (!is_array($ip_data)) {
+        return array(false, 'missing-data');
+    }
+
+    if (pcr_ac_is_whitelisted_result($ip_data)) {
+        return array(false, 'whitelisted');
+    }
+
+    $detections = isset($ip_data['detections']) && is_array($ip_data['detections'])
+        ? $ip_data['detections']
+        : array();
+
+    $blockable_keys = array('proxy', 'vpn', 'hosting', 'datacenter', 'vps', 'bot', 'tor', 'compromised', 'scraper', 'anonymous');
+    foreach ($blockable_keys as $key) {
+        if (array_key_exists($key, $detections) && pcr_ac_truthy_flag($detections[$key])) {
+            return array(true, $key);
         }
     }
-    
-    return $is_proxy;
+
+    $network_type_value = isset($ip_data['network']['type']) ? $ip_data['network']['type'] : '';
+    $network_type = strtolower((string) $network_type_value);
+    if ($network_type === 'hosting') {
+        return array(true, 'hosting');
+    }
+
+    if (array_key_exists('risk', $detections) && is_numeric($detections['risk'])) {
+        $risk_score = (int) $detections['risk'];
+        if ($risk_score > PCR_HIGH_RISK_THRESHOLD) {
+            return array(true, 'risk');
+        }
+    }
+
+    return array(false, 'clean');
 }
 
 // === REDIRECT LOGIC ===
@@ -248,7 +300,7 @@ add_action('template_redirect', function () {
     if (is_admin() || !get_option(PCR_SETUP_DONE)) return;
 
     // Get the real IP address (handles Cloudflare and other proxies)
-    $ip = pcr_get_real_ip();
+    $ip = pcr_ac_get_real_ip();
     if (!$ip) {
         error_log('PCR DEBUG: Could not determine valid IP address.');
         return;
@@ -259,10 +311,10 @@ add_action('template_redirect', function () {
 
     // Clean expired cache entries periodically (1% chance)
     if (mt_rand(1, 100) === 1) {
-        pcr_clean_expired_cache();
+        pcr_ac_clean_expired_cache();
     }
 
-    $cached = pcr_get_cached_ip($ip_hash);
+    $cached = pcr_ac_get_cached_ip($ip_hash);
     $is_proxy = false;
     $needs_check = true;
 
@@ -275,9 +327,11 @@ add_action('template_redirect', function () {
             $needs_check = false;
             error_log('PCR DEBUG: Using cached proxy status: ' . ($is_proxy ? 'proxy' : 'clean') . " (age: {$age}s)");
         } else {
-            error_log('PCR DEBUG: Cached entry expired (age: ' . $age . 's), rechecking');
+            error_log('PCR DEBUG: Cached entry expired (age: {$age}s), rechecking');
         }
     }
+
+    $block_reason = '';
 
     if ($needs_check) {
         if (!file_exists(PCR_SALT_FILE)) {
@@ -292,7 +346,7 @@ add_action('template_redirect', function () {
         }
 
         $encrypted_key = get_option(PCR_OPTION_KEY);
-        $api_key = pcr_decrypt($encrypted_key, $salt);
+        $api_key = pcr_ac_decrypt($encrypted_key, $salt);
         if (!$api_key) {
             error_log('PCR DEBUG: Decryption failed.');
             return;
@@ -300,45 +354,68 @@ add_action('template_redirect', function () {
 
         error_log('PCR DEBUG: API key decrypted successfully');
 
-        // Get the site domain for the tag
-        $site_domain = parse_url(get_site_url(), PHP_URL_HOST);
-        $tag = rawurlencode('Access Control - ' . $site_domain);
-        
-        $url = "https://proxycheck.io/v2/{$ip}?key={$api_key}&vpn=1&asn=1&node=1&tag={$tag}";
-        $response = wp_remote_get($url, ['timeout' => 5]);
+        $tag = rawurlencode('Global IPconnect Access Control');
+        $url = sprintf(
+            'https://proxycheck.io/v3/%s?key=%s&tag=%s&node=1',
+            $ip,
+            rawurlencode($api_key),
+            $tag
+        );
+
+        $response = wp_remote_get($url, array(
+            'timeout' => 8,
+            'headers' => array('Accept' => 'application/json'),
+        ));
 
         if (is_wp_error($response)) {
             error_log('PCR DEBUG: Proxycheck API call failed: ' . $response->get_error_message());
             return;
         }
 
-        $body = json_decode(wp_remote_retrieve_body($response), true);
+        $body_raw = wp_remote_retrieve_body($response);
+        $body = json_decode($body_raw, true);
         error_log('PCR DEBUG: Proxycheck response: ' . print_r($body, true));
 
-        // Check if IP data exists in response
-        if (isset($body[$ip]) && is_array($body[$ip])) {
-            $is_proxy = pcr_should_block_ip($body[$ip]);
-            pcr_update_ip_cache($ip, $ip_hash, $is_proxy);
-        } else {
-            error_log('PCR DEBUG: No valid IP data in response');
-            $is_proxy = false;
+        if (!is_array($body)) {
+            error_log('PCR DEBUG: Proxycheck response could not be decoded. Raw body: ' . $body_raw);
+            return;
+        }
+
+        $status = isset($body['status']) ? $body['status'] : null;
+        if (!in_array($status, array('ok', 'warning'), true)) {
+            error_log('PCR DEBUG: Unexpected Proxycheck status: ' . print_r($status, true));
+            return;
+        }
+
+        if (!isset($body[$ip]) || !is_array($body[$ip])) {
+            error_log('PCR DEBUG: Proxycheck response missing IP payload.');
+            return;
+        }
+
+        list($is_proxy, $block_reason) = pcr_ac_should_block_ip_data($body[$ip]);
+        pcr_ac_update_ip_cache($ip, $ip_hash, $is_proxy);
+    } else {
+        if ($is_proxy) {
+            $block_reason = 'cache';
         }
     }
 
     if ($is_proxy) {
         $current_url = (is_ssl() ? 'https://' : 'http://') . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI'];
-        error_log('PCR DEBUG: Redirecting to block page');
+        $reason_message = $block_reason ? " ({$block_reason})" : '';
+        error_log('PCR DEBUG: Redirecting to block page' . $reason_message);
         wp_redirect(PCR_BLOCK_URL . urlencode($current_url), 307);
         exit;
     } else {
-        error_log('PCR DEBUG: Visitor is not a proxy or is whitelisted');
+        $allow_reason = ($block_reason === 'whitelisted') ? ' (whitelisted)' : '';
+        error_log('PCR DEBUG: Visitor allowed' . $allow_reason);
     }
 });
 
 // === UNINSTALL CLEANUP ===
-register_uninstall_hook(__FILE__, 'pcr_plugin_uninstall');
+register_uninstall_hook(__FILE__, 'pcr_ac_plugin_uninstall');
 
-function pcr_plugin_uninstall() {
+function pcr_ac_plugin_uninstall() {
     delete_option(PCR_OPTION_KEY);
     delete_option(PCR_SETUP_DONE);
     delete_option('pcr_activation_redirect');
