@@ -1,85 +1,171 @@
 # Global IPconnect Access Control for WordPress
 
-**Global IPconnect Access Control** is a lightweight WordPress plugin that detects and redirects visitors using known proxy, VPN, or hosting network IPs. It uses [proxycheck.io](https://proxycheck.io) to verify the visitor's IP and redirects suspicious traffic to a managed block page.
+Global IPconnect Access Control is a WordPress security plugin that combines IP reputation checks from [proxycheck.io](https://proxycheck.io) with on-site request inspection, visitor logging, and optional early loading through WordPress must-use plugins.
 
----
+It can:
 
-## Features
+- redirect visitors detected as proxy, VPN, hosting, datacenter, Tor, bot, scraper, or otherwise anonymous traffic;
+- redirect outdated browsers to a managed upgrade notice page;
+- inspect requests for common attack patterns before the page is rendered; and
+- record detailed visitor activity for review in WordPress admin.
 
-* Detects visitors using proxy, VPN, or hosting IP addresses
-* Uses proxycheck.io API with 30-minute result caching
-* Secure API key storage — not viewable or editable after initial setup
-* Automatic redirection to a block page if proxy use is detected
-* Simple setup process, no configuration needed afterward
-* API queries tagged for identification in your proxycheck.io dashboard
+## Feature Summary
 
----
+- Proxy, VPN, hosting, datacenter, VPS, Tor, bot, scraper, and anonymous IP detection via proxycheck.io.
+- 30-minute IP result caching to reduce API usage.
+- Short timeout cache to avoid repeated lookups during API timeouts.
+- Outdated browser detection with redirect support to the Global IPconnect 426 page.
+- Advanced threat detection for:
+  - PHP code injection
+  - SQL injection
+  - requests for non-existent PHP files
+  - malicious file uploads
+  - XSS payloads
+  - directory traversal attempts
+  - recursively encoded base64 payloads
+- Detailed visitor logging with request method, HTTP status, parsed user agent, reverse DNS hostname, suspicious request flag, threat metadata, referrer, sanitized request data, and selected request headers.
+- Admin pages for Settings, Visitor Logs, and Threat Detection.
+- Optional MU-plugin loader so the plugin can run before regular plugins.
+- Encrypted API key storage with salt recovery if the salt file is missing.
+- Automatic cleanup of old logs based on the configured retention window.
 
 ## Requirements
 
-* WordPress 5.0 or later
-* PHP 7.2 or later
-* An active [proxycheck.io](https://proxycheck.io) API key
-
----
+- WordPress 6.8 or later
+- PHP 7.4 or later
+- A valid proxycheck.io API key
+- File system write access if you want the plugin to install the MU-plugin loader automatically
 
 ## Installation
 
-1. Upload the plugin ZIP via the WordPress Admin Dashboard or extract it manually into the `wp-content/plugins/` directory.
-2. Activate the plugin.
-3. You will be redirected to a one-time setup screen to enter your proxycheck.io API key.
-4. Once saved, the API key is encrypted and cannot be retrieved or edited later.
+1. Copy the plugin into `wp-content/plugins/access-control/`.
+2. Activate the plugin from the WordPress admin Plugins screen.
+3. On first activation, WordPress redirects you to the setup page.
+4. Enter your proxycheck.io API key and save it.
+5. Review the Threat Detection settings page and enable the detection engine if you want request inspection in addition to proxy/VPN blocking.
 
----
+## Optional Early Loading via MU-Plugin
 
-## How It Works
+For security-first deployments, the plugin can install a must-use loader so it is loaded before regular plugins.
 
-* On each visitor request, the plugin checks if their IP is stored in the cache.
-* If not cached, the plugin sends a secure query to proxycheck.io using your API key.
-* If the visitor is flagged as using a proxy or VPN, they are redirected to:
+You can enable this from the Threat Detection page in WordPress admin. The loader file is:
 
-  ```
-  https://access.global-ipconnect.com/403/?from={original_full_requested_url}
-  ```
-* API responses are cached for 30 minutes to reduce API usage.
+`wp-content/mu-plugins/load-access-control-early.php`
 
----
+Manual setup is also possible:
 
-## Privacy
+1. Create `wp-content/mu-plugins/` if it does not exist.
+2. Copy `load-access-control-early.php` from this plugin into that directory.
+3. Confirm the main plugin remains installed at `wp-content/plugins/access-control/index.php`.
 
-When a visitor is redirected, their original requested URL is passed as a query string to the Global IPconnect block page service. This redirect request originates from your domain and is logged by Global IPconnect.
+## Admin Pages
 
-### What is logged:
+After activation, the plugin adds a Global IPconnect menu with these pages:
 
-* IP address of the visitor
-* Source domain
-* Requested URL path
+- Settings: store or replace the proxycheck.io API key.
+- Visitor Logs: review traffic, filter requests, inspect suspicious entries, and perform database upgrades for new log columns.
+- Threat Detection: enable the detection engine, tune detection methods, manage whitelists, choose block behavior, configure notification email, and install or remove the MU-plugin loader.
 
-### How logs are used:
+The plugin also adds a Flush IP Cache button to the WordPress admin bar for administrators.
 
-* Logs are reviewed only to ensure that valid IP addresses are not being misclassified or blocked in error.
-* Logs are not sold, shared, or used for marketing, analytics, or behavioral tracking.
-* Logs are periodically purged to minimize retention.
+## How Request Handling Works
 
-Global IPconnect adheres to strong privacy and data minimization practices.
+### IP reputation and browser checks
 
----
+On frontend requests, the plugin:
 
-## Security
+1. Determines the client IP, with support for Cloudflare and common proxy headers.
+2. Redirects outdated browsers to `https://access.global-ipconnect.com/426/` unless the request comes from a recognized search bot or WordPress updater.
+3. Looks up the IP in the local cache.
+4. If the cache is stale or missing, queries proxycheck.io.
+5. Blocks or redirects traffic when the response indicates proxy, VPN, hosting, bot, Tor, scraper, anonymous, blacklist-modified, or similar high-risk attributes.
 
-* The API key is encrypted using AES-256-CBC and stored in the database.
-* The encryption key is derived from a random salt stored securely in the plugin directory.
-* The plugin enforces a strict one-time API key setup to prevent exposure in the admin UI.
+Proxycheck queries are tagged using the current site domain so they are easier to identify in the proxycheck.io dashboard.
 
----
+### Threat detection
+
+When the threat detection engine is enabled, it runs before normal access-control handling and can inspect:
+
+- GET parameters
+- POST parameters
+- uploaded files
+- requests for suspicious PHP paths
+
+By default, the settings include support for:
+
+- PHP injection detection
+- SQL injection detection
+- PHP scan detection
+- file upload inspection
+- XSS detection
+- directory traversal detection
+- recursive base64 decoding
+
+Detected threats can either:
+
+- be logged only;
+- be blocked directly with a configurable HTTP status code; or
+- be redirected to the managed Global IPconnect 403 page with the threat reason attached.
+
+Critical and high-severity detections can also trigger email notifications.
+
+## Visitor Logging
+
+The visitor log is designed for review and triage, not just simple hit counting. Logged data can include:
+
+- visit time
+- full requested URL
+- client IP address
+- reverse DNS hostname
+- raw and parsed user agent
+- HTTP status code
+- logged-in username or email, when available
+- request method
+- suspicious request flag
+- threat detection flag, type, name, severity, and detail text
+- referrer
+- sanitized GET and POST data
+- selected request headers
+
+The Visitor Logs page supports filtering by IP, URL, username, HTTP code, request method, suspicious status, error status, and date range. It also exposes preset views for common investigations such as suspicious requests, form posts, 404s, REST requests, and XML-RPC traffic.
+
+## Whitelisting and Bypass Controls
+
+Threat Detection includes built-in bypass controls for trusted traffic:
+
+- IP whitelist with single IP, CIDR, and wildcard support
+- URL whitelist with exact match, wildcard, and `regex:` patterns
+- form field whitelist for parameters that should not be inspected
+
+These controls only affect the threat detection engine. They do not change proxycheck.io classifications.
+
+## Data Handling and Privacy
+
+When the plugin redirects a blocked visitor to Global IPconnect-managed pages, the original request URL is passed to the external service as a query parameter. This allows the remote block page to display context and log the event.
+
+Within WordPress, the plugin stores visitor logs locally in custom database tables. Request payload logging is sanitized before storage to reduce exposure of sensitive information. Common personal, authentication, and payment-related fields are redacted or removed.
+
+The visitor log retention period is configurable from the Threat Detection settings page. Set the retention value to `0` to disable automatic deletion.
+
+## Security Notes
+
+- The proxycheck.io API key is encrypted with AES-256-CBC before storage.
+- The encryption salt is stored in both a WordPress option and a file so the plugin can recover gracefully if the file is deleted.
+- Re-saving the API key regenerates the salt and updates the encrypted payload.
+- If the visitor log schema is behind the current code version, the admin UI exposes upgrade actions for new logging columns.
 
 ## Uninstall Behavior
 
-* On plugin uninstall, all plugin settings — including the encrypted API key and salt — are removed from the database and file system.
-* Reinstalling the plugin will require you to re-enter your API key during setup.
+On uninstall, the plugin removes:
 
----
+- the encrypted API key and setup flags;
+- the stored salt option and salt files;
+- the IP cache and visitor log tables;
+- scheduled cleanup events; and
+- plugin-specific transients and options.
+
+If you used the MU-plugin loader, remove `wp-content/mu-plugins/load-access-control-early.php` if it still exists after uninstall.
 
 ## Support
 
-This plugin is maintained by Global IPconnect. For help or questions, please open an issue or contact support through your existing channels.
+This plugin is maintained by Global IPconnect. Use your normal support channel for deployment, API, or security review questions.
